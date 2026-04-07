@@ -1,21 +1,33 @@
 import re
 import time
-from seleniumwire import webdriver  # Changed from selenium to seleniumwire
+import urllib.parse
+import json
+from seleniumwire import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
-def discover_with_selenium(target_url):
-    print(f"[*] Launching controlled browser for: {target_url}")
+def decode_moodle_ajax(url):
+    """Decodes Moodle AJAX arguments to see the actual function names."""
+    try:
+        parsed_url = urllib.parse.urlparse(url)
+        params = urllib.parse.parse_qs(parsed_url.query)
+        if 'args' in params:
+            decoded_args = urllib.parse.unquote(params['args'][0])
+            return f" [Moodle Logic: {decoded_args[:100]}...]"
+    except:
+        pass
+    return ""
 
-    # Set up Chrome options
+def discover_with_selenium(target_url):
+    print(f"[*] Launching automated discovery for: {target_url}")
+
     chrome_options = Options()
-    # chrome_options.add_argument("--headless")  # Uncomment to run without a window
+    # chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--disable-blink-features=AutomationControlled") 
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     
-    # Initialize the selenium-wire driver
-    # selenium-wire uses the same Service/Options as standard selenium
     driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()), 
         options=chrome_options
@@ -24,48 +36,64 @@ def discover_with_selenium(target_url):
     found_endpoints = set()
 
     try:
+        # --- PHASE 1: Initial Load ---
         driver.get(target_url)
-        
-        # Give the page 5 seconds to execute JavaScript and load background resources
-        print("[*] Waiting for page to load and background requests to trigger...")
-        time.sleep(5)
+        time.sleep(4)
 
-        # 1. Extract endpoints from the DOM (Links, Forms, Scripts)
-        elements = driver.find_elements("xpath", "//*[@src or @href or @action]")
+        # --- PHASE 2: Form Interaction (Automated Typing/Submit) ---
+        print("[*] Attempting to trigger POST endpoints via form interaction...")
+        try:
+            # Look for common Moodle forgot password fields
+            input_box = None
+            for selector in ["#id_email", "#id_username", "input[name='email']", "input[name='username']"]:
+                try:
+                    input_box = driver.find_element(By.CSS_SELECTOR, selector)
+                    if input_box: break
+                except: continue
+            
+            if input_box:
+                input_box.send_keys("discovery_test@kwasu.edu.ng")
+                # Find and click the submit button
+                submit_btn = driver.find_element(By.CSS_SELECTOR, "input[type='submit'], button[type='submit']")
+                submit_btn.click()
+                print("[+] Form submitted. Capturing redirection traffic...")
+                time.sleep(5) # Wait for redirect/POST response
+        except Exception as e:
+            print(f"[!] Interaction failed (might not be a form here): {e}")
+
+        # --- PHASE 3: Extraction ---
+        # 1. DOM Extraction
+        elements = driver.find_elements(By.XPATH, "//*[@src or @href or @action]")
         for el in elements:
             for attr in ['src', 'href', 'action']:
                 try:
                     val = el.get_attribute(attr)
-                    if val:
-                        found_endpoints.add(val)
-                except:
-                    continue
+                    if val: found_endpoints.add(val)
+                except: continue
 
-        # 2. Search for API/v1 patterns in the rendered HTML source
+        # 2. Regex Search
         patterns = [
             r'https?://[\w\.-]+(?:/api/[\w/\.-]+)?',
-            r'/(?:api|v\d|graphql|json)/[\w\.-/]+'
+            r'/(?:api|v\d|graphql|json|webservice)/[\w\.-/]+'
         ]
-        page_source = driver.page_source
         for pattern in patterns:
-            matches = re.findall(pattern, page_source)
+            matches = re.findall(pattern, driver.page_source)
             found_endpoints.update(matches)
 
-        # 3. Capture Hidden Background API Calls (The "Wire" logic)
-        print("\n[+] Hidden Background API Calls Captured:")
+        # 3. Capture Background "Wire" Traffic
+        print("\n[+] Traffic Captured (including AJAX & POST):")
         for request in driver.requests:
             if request.response:
-                # Filter for things that look like data/services
                 url = request.url
-                if any(x in url.lower() for x in ["php", "json", "service", "api"]):
-                    print(f"Method: {request.method} | Status: {request.response.status_code} | URL: {url}")
+                if any(x in url.lower() for x in ["php", "json", "service", "api", "webservice"]):
+                    moodle_info = decode_moodle_ajax(url)
+                    print(f"[{request.method}] {request.response.status_code} | {url}{moodle_info}")
                     found_endpoints.add(url)
 
-        print(f"\n[+] Extraction complete. Found {len(found_endpoints)} potential items.")
         return found_endpoints
 
     except Exception as e:
-        print(f"[!] Selenium Error: {e}")
+        print(f"[!] Error: {e}")
         return []
     finally:
         driver.quit()
@@ -74,8 +102,8 @@ def discover_with_selenium(target_url):
 target = "https://lms.kwasu.edu.ng/login/forgot_password.php"
 results = discover_with_selenium(target)
 
-print("\n--- All Unique Discovered Endpoints (Filtered) ---")
+print("\n--- Final Filtered Results ---")
 for r in sorted(results):
-    # Filtering to show only relevant domain results or relative paths
     if "kwasu.edu.ng" in r or r.startswith("/"):
+        # Clean up session keys for cleaner output if desired
         print(r)
