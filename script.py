@@ -15,13 +15,14 @@ def decode_moodle_ajax(url):
         params = urllib.parse.parse_qs(parsed_url.query)
         if 'args' in params:
             decoded_args = urllib.parse.unquote(params['args'][0])
-            return f" [Moodle Logic: {decoded_args[:100]}...]"
+            # Return a cleaned up version of the JSON args
+            return f" -> [Moodle Action: {decoded_args[:120]}]"
     except:
         pass
     return ""
 
 def discover_with_selenium(target_url):
-    print(f"[*] Launching automated discovery for: {target_url}")
+    print(f"[*] Launching Deep Discovery for: {target_url}")
 
     chrome_options = Options()
     # chrome_options.add_argument("--headless") 
@@ -36,16 +37,17 @@ def discover_with_selenium(target_url):
     found_endpoints = set()
 
     try:
-        # --- PHASE 1: Initial Load ---
+        # --- PHASE 1: Initial Load & Header Capture ---
         driver.get(target_url)
         time.sleep(4)
 
-        # --- PHASE 2: Form Interaction (Automated Typing/Submit) ---
-        print("[*] Attempting to trigger POST endpoints via form interaction...")
+        # --- PHASE 2: Automated Form Interaction ---
+        print("[*] Interacting with form to trigger hidden POST logic...")
         try:
-            # Look for common Moodle forgot password fields
+            # Smart selector for Moodle's reset fields
+            selectors = ["#id_email", "#id_username", "input[name='email']", "input[name='username']"]
             input_box = None
-            for selector in ["#id_email", "#id_username", "input[name='email']", "input[name='username']"]:
+            for selector in selectors:
                 try:
                     input_box = driver.find_element(By.CSS_SELECTOR, selector)
                     if input_box: break
@@ -53,16 +55,45 @@ def discover_with_selenium(target_url):
             
             if input_box:
                 input_box.send_keys("discovery_test@kwasu.edu.ng")
-                # Find and click the submit button
                 submit_btn = driver.find_element(By.CSS_SELECTOR, "input[type='submit'], button[type='submit']")
                 submit_btn.click()
-                print("[+] Form submitted. Capturing redirection traffic...")
-                time.sleep(5) # Wait for redirect/POST response
+                print("[+] Interaction successful. Monitoring response...")
+                time.sleep(5) 
         except Exception as e:
-            print(f"[!] Interaction failed (might not be a form here): {e}")
+            print(f"[-] Interaction skipped: {e}")
 
-        # --- PHASE 3: Extraction ---
-        # 1. DOM Extraction
+        # --- PHASE 3: Deep Traffic Analysis ---
+        print("\n" + "="*50)
+        print("INTERCEPTED DATA FLOW")
+        print("="*50)
+
+        for request in driver.requests:
+            if request.response:
+                url = request.url
+                # Focus only on target domain
+                if "kwasu.edu.ng" in url.lower():
+                    status = request.response.status_code
+                    method = request.method
+                    moodle_meta = decode_moodle_ajax(url)
+
+                    print(f"[{method}] {status} | {url}{moodle_meta}")
+
+                    # --- NEW: POST Payload Inspection ---
+                    if method == "POST" and request.body:
+                        try:
+                            body = request.body.decode('utf-8', errors='ignore')
+                            print(f"    └─ [PAYLOAD]: {body[:200]}")
+                        except:
+                            pass
+
+                    # --- NEW: Header Security Check ---
+                    if 'sesskey' in url:
+                        found_endpoints.add(url)
+
+        # --- PHASE 4: Scrape Rendered DOM & Regex ---
+        page_source = driver.page_source
+        
+        # DOM Extraction
         elements = driver.find_elements(By.XPATH, "//*[@src or @href or @action]")
         for el in elements:
             for attr in ['src', 'href', 'action']:
@@ -71,39 +102,31 @@ def discover_with_selenium(target_url):
                     if val: found_endpoints.add(val)
                 except: continue
 
-        # 2. Regex Search
+        # Deep Regex for Moodle sub-directories
         patterns = [
-            r'https?://[\w\.-]+(?:/api/[\w/\.-]+)?',
-            r'/(?:api|v\d|graphql|json|webservice)/[\w\.-/]+'
+            r'https?://lms\.kwasu\.edu\.ng/[\w\.-/]+\.php',
+            r'/lib/ajax/[\w\.-]+\.php',
+            r'/webservice/rest/[\w\.-]+\.php'
         ]
         for pattern in patterns:
-            matches = re.findall(pattern, driver.page_source)
+            matches = re.findall(pattern, page_source)
             found_endpoints.update(matches)
-
-        # 3. Capture Background "Wire" Traffic
-        print("\n[+] Traffic Captured (including AJAX & POST):")
-        for request in driver.requests:
-            if request.response:
-                url = request.url
-                if any(x in url.lower() for x in ["php", "json", "service", "api", "webservice"]):
-                    moodle_info = decode_moodle_ajax(url)
-                    print(f"[{request.method}] {request.response.status_code} | {url}{moodle_info}")
-                    found_endpoints.add(url)
 
         return found_endpoints
 
     except Exception as e:
-        print(f"[!] Error: {e}")
+        print(f"[!] Critical Error: {e}")
         return []
     finally:
         driver.quit()
 
-# Usage
+# Run discovery
 target = "https://lms.kwasu.edu.ng/login/forgot_password.php"
 results = discover_with_selenium(target)
 
-print("\n--- Final Filtered Results ---")
+print("\n" + "="*50)
+print("FINAL ENDPOINT DIRECTORY")
+print("="*50)
 for r in sorted(results):
     if "kwasu.edu.ng" in r or r.startswith("/"):
-        # Clean up session keys for cleaner output if desired
         print(r)
